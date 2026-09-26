@@ -1,6 +1,10 @@
 const VIDEO_W = 320;
 const VIDEO_H = 240;
 const PINCH_THRESHOLD = 60;
+const NOTE_TRIGGER_GAP_MS = 160;
+const HAND_STABLE_MS = 250;
+const EXPLOSION_COOLDOWN_MS = 500;
+const MAX_PINCH_HOLD_MS = 2500;
 
 let particles = [];
 let cols, rows, flowField, scl = 60, zoff = 0;
@@ -26,6 +30,9 @@ let handpanSynth, xylophoneSynth, reverb, delayEffect;
 let limiter, compressor;
 let currentXyloNote = "";
 let lastXyloTrigger = 0;
+let leftHandStableSince = 0;
+let rightHandStableSince = 0;
+let lastExplosionAt = 0;
 
 const starryColors = [
   [25, 25, 112], [65, 105, 225], [30, 191, 255],
@@ -62,25 +69,30 @@ function setup() {
   for (let i = 0; i < maxParticles; i++) particles.push(new Particle(random(width), random(height), true));
   background(10, 10, 30);
 
-  limiter = new Tone.Limiter(-1).toDestination();
-  compressor = new Tone.Compressor({ threshold: -20, ratio: 3, attack: 0.05, release: 0.2 }).connect(limiter);
-  reverb = new Tone.Reverb({ decay: 4, wet: 0.5 }).connect(compressor);
-  delayEffect = new Tone.FeedbackDelay("8n", 0).connect(reverb);
+  // 留出足夠的音量餘裕，避免多個殘響或延遲聲部疊加時產生爆音。
+  limiter = new Tone.Limiter(-6).toDestination();
+  compressor = new Tone.Compressor({ threshold: -24, ratio: 6, attack: 0.01, release: 0.3 }).connect(limiter);
+  reverb = new Tone.Reverb({ decay: 2.5, wet: 0.28 }).connect(compressor);
+  delayEffect = new Tone.FeedbackDelay({ delayTime: "8n", feedback: 0, wet: 0.2 }).connect(reverb);
   handpanSynth = new Tone.PolySynth(Tone.Synth, {
     maxPolyphony: 6,
     oscillator: { type: "sine" },
-    envelope: { attack: 0.01, decay: 0.8, sustain: 0.05, release: 2 }
+    envelope: { attack: 0.02, decay: 0.65, sustain: 0.04, release: 1.2 }
   }).connect(reverb);
-  handpanSynth.volume.value = -2;
+  handpanSynth.volume.value = -8;
   xylophoneSynth = new Tone.PolySynth(Tone.Synth, {
     maxPolyphony: 6,
     oscillator: { type: "sine" },
-    envelope: { attack: 0.005, decay: 0.2, sustain: 0, release: 1 }
+    envelope: { attack: 0.012, decay: 0.16, sustain: 0, release: 0.35 }
   }).connect(delayEffect);
-  xylophoneSynth.volume.value = -2;
+  xylophoneSynth.volume.value = -10;
 
   document.getElementById("startButton").addEventListener("click", startExperience);
   document.getElementById("retryButton").addEventListener("click", () => location.reload());
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) resetAudioInteraction();
+  });
+  window.addEventListener("blur", resetAudioInteraction);
   startCamera();
 }
 
@@ -129,6 +141,8 @@ async function startExperience() {
 }
 
 function gotHands(results) {
+  const previousRightHandIndex = rightHandIndex;
+  const previousLeftHandIndex = leftHandIndex;
   hands = results;
   rightHandIndex = -1;
   leftHandIndex = -1;
@@ -136,7 +150,50 @@ function gotHands(results) {
     if (hands[i].handedness === "Right") rightHandIndex = i;
     else if (hands[i].handedness === "Left") leftHandIndex = i;
   }
+
+  const now = millis();
+  if (rightHandIndex !== -1 && previousRightHandIndex === -1) {
+    rightHandStableSince = now;
+    // 手離開鏡頭後重新出現，不把這次出現誤判成「放開捏合」。
+    wasPinching = false;
+    isPinching = false;
+    holdStartTime = 0;
+  } else if (rightHandIndex === -1 && previousRightHandIndex !== -1) {
+    resetRightHandAudio();
+  }
+
+  if (leftHandIndex !== -1 && previousLeftHandIndex === -1) {
+    leftHandStableSince = now;
+    currentXyloNote = "";
+    lastXyloTrigger = now;
+  } else if (leftHandIndex === -1 && previousLeftHandIndex !== -1) {
+    resetLeftHandAudio();
+  }
   setStatus(hands.length ? `已辨識 ${hands.length} 隻手` : "攝影機已啟動，請將雙手移入鏡頭範圍");
+}
+
+function resetRightHandAudio() {
+  isPinching = false;
+  wasPinching = false;
+  holdStartTime = 0;
+  blackHoleStrength = 0;
+  rightHandStableSince = 0;
+  if (handpanSynth) handpanSynth.releaseAll(Tone.now());
+}
+
+function resetLeftHandAudio() {
+  currentXyloNote = "";
+  leftHandStableSince = 0;
+  if (xylophoneSynth) xylophoneSynth.releaseAll(Tone.now());
+  if (delayEffect) delayEffect.feedback.rampTo(0, 0.08);
+}
+
+function resetAudioInteraction() {
+  resetRightHandAudio();
+  resetLeftHandAudio();
+  hands = [];
+  rightHandIndex = -1;
+  leftHandIndex = -1;
 }
 
 function draw() {
@@ -177,10 +234,12 @@ function draw() {
 }
 
 function updateHandLogic() {
-  if (rightHandIndex !== -1) {
+  if (rightHandIndex !== -1 && millis() - rightHandStableSince >= HAND_STABLE_MS) {
     const hand = hands[rightHandIndex];
     const indexTip = hand.keypoints[8];
     const thumbTip = hand.keypoints[4];
+    if (!indexTip || !thumbTip || !Number.isFinite(indexTip.x) || !Number.isFinite(indexTip.y) ||
+        !Number.isFinite(thumbTip.x) || !Number.isFinite(thumbTip.y)) return;
     rightHandPos.x = lerp(rightHandPos.x, map(indexTip.x, 0, VIDEO_W, 0, width), smoothFactor);
     rightHandPos.y = lerp(rightHandPos.y, map(indexTip.y, 0, VIDEO_H, 0, height), smoothFactor);
     const dx = indexTip.x - thumbTip.x;
@@ -190,18 +249,20 @@ function updateHandLogic() {
     else if (!pinch && wasPinching) { isPinching = false; triggerHandpanExplosion(); }
     wasPinching = pinch;
   }
-  if (leftHandIndex !== -1) {
+  if (leftHandIndex !== -1 && millis() - leftHandStableSince >= HAND_STABLE_MS) {
     const indexTip = hands[leftHandIndex].keypoints[8];
+    if (!indexTip || !Number.isFinite(indexTip.x) || !Number.isFinite(indexTip.y)) return;
     leftHandPos.x = lerp(leftHandPos.x, map(indexTip.x, 0, VIDEO_W, 0, width), smoothFactor);
     leftHandPos.y = lerp(leftHandPos.y, map(indexTip.y, 0, VIDEO_H, 0, height), smoothFactor);
     let noteIndex = constrain(floor(map(leftHandPos.y, height, 0, 0, xyloScale.length)), 0, xyloScale.length - 1);
     const targetNote = xyloScale[noteIndex];
-    if (targetNote !== currentXyloNote && millis() - lastXyloTrigger > 80) {
-      xylophoneSynth.triggerAttackRelease(targetNote, "32n", undefined, 0.6);
+    if (targetNote !== currentXyloNote && millis() - lastXyloTrigger > NOTE_TRIGGER_GAP_MS) {
+      xylophoneSynth.triggerAttackRelease(targetNote, "32n", Tone.now() + 0.01, 0.35);
       currentXyloNote = targetNote;
       lastXyloTrigger = millis();
     }
-    delayEffect.feedback.rampTo(constrain(map(leftHandPos.x, 0, width, 0, 0.5), 0, 0.95), 0.1);
+    // 回授量限制在 0.22，避免長時間閒置時延遲訊號累積後突然爆音。
+    delayEffect.feedback.rampTo(constrain(map(leftHandPos.x, 0, width, 0, 0.22), 0, 0.22), 0.15);
   }
 }
 
@@ -231,12 +292,16 @@ function drawVisuals() {
 }
 
 function triggerHandpanExplosion() {
-  const holdTime = millis() - holdStartTime;
+  const now = millis();
+  if (!holdStartTime || now - lastExplosionAt < EXPLOSION_COOLDOWN_MS) return;
+  const holdTime = constrain(now - holdStartTime, 0, MAX_PINCH_HOLD_MS);
+  if (holdTime < 100) return;
+  lastExplosionAt = now;
   const power = constrain(map(holdTime, 0, 2000, 5, 15), 5, 15);
   const radius = constrain(map(holdTime, 0, 2000, 150, 350), 150, 350);
   const notes = [random(handpanScale)];
   if (random() > 0.4) notes.push(random(handpanScale));
-  handpanSynth.triggerAttackRelease(notes, "1n", undefined, map(holdTime, 0, 2000, 0.4, 0.8));
+  handpanSynth.triggerAttackRelease(notes, "1n", Tone.now() + 0.01, map(holdTime, 0, 2000, 0.25, 0.5));
   ripples.push(new Ripple(rightHandPos.x, rightHandPos.y, radius));
   for (const particle of particles) particle.fireworkExplode(createVector(rightHandPos.x, rightHandPos.y), power, radius);
 }
