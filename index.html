@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="description" content="指・感受：以雙手微手勢控制粒子視覺與聲音回饋的跨世代互動作品。">
+  <title>指・感受</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23080a1d'/%3E%3Ccircle cx='24' cy='32' r='8' fill='%2379a4ff'/%3E%3Ccircle cx='40' cy='32' r='8' fill='%23f2b86b'/%3E%3C/svg%3E">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+  <script src="https://unpkg.com/ml5@1.2.1/dist/ml5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <style>
+    :root { --ink:#f7f4ee; --muted:#aab2c4; --blue:#79a4ff; --gold:#f2b86b; --panel:rgba(9,12,24,.88); }
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; background:#080a1d; color:var(--ink); font-family:"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+    canvas { display:block; position:fixed; inset:0; z-index:0; }
+    .hud { position:fixed; inset:0; z-index:2; pointer-events:none; }
+    .brand { position:absolute; top:1.4rem; left:1.6rem; text-shadow:0 2px 18px #000; }
+    .brand h1 { margin:0; font-size:clamp(1.6rem,3vw,2.5rem); letter-spacing:.18em; font-weight:600; }
+    .brand p { margin:.45rem 0 0; color:var(--muted); font-size:.9rem; letter-spacing:.06em; }
+    #status { position:absolute; top:1.5rem; right:1.6rem; max-width:min(34rem,58vw); padding:.65rem .9rem; border:1px solid rgba(255,255,255,.14); border-radius:1rem; background:rgba(5,8,18,.82); color:#dbe4ff; font-size:.9rem; line-height:1.5; text-align:center; backdrop-filter:blur(10px); }
+    #instruction-panel { position:absolute; left:50%; bottom:1.4rem; transform:translateX(-50%); display:grid; grid-template-columns:1fr 1fr; gap:.7rem; width:min(55rem,calc(100% - 2rem)); opacity:.35; transition:opacity .35s; }
+    .hand-card { padding:.9rem 1rem; border:1px solid rgba(255,255,255,.13); border-radius:1rem; background:var(--panel); backdrop-filter:blur(12px); }
+    .hand-card.right { text-align:right; }
+    .hand-label { margin-bottom:.3rem; color:var(--muted); font-size:.8rem; letter-spacing:.12em; }
+    .instr-action { font-size:1rem; line-height:1.6; }
+    .left-hand { color:#7ef0d6; } .right-hand { color:#ffaaa1; }
+    .start-layer { position:fixed; inset:0; z-index:5; display:grid; place-items:center; padding:1.5rem; background:radial-gradient(circle at 30% 38%,rgba(73,99,216,.22),transparent 30%),radial-gradient(circle at 70% 58%,rgba(242,184,107,.16),transparent 28%),rgba(6,8,23,.92); transition:opacity .4s,visibility .4s; }
+    .start-layer.is-hidden { opacity:0; visibility:hidden; pointer-events:none; }
+    .start-card { width:min(38rem,94vw); padding:2rem; border:1px solid rgba(255,255,255,.14); border-radius:1.6rem; background:rgba(10,14,29,.92); box-shadow:0 26px 90px rgba(0,0,0,.45); text-align:center; backdrop-filter:blur(16px); }
+    .start-card h2 { margin:0 0 .7rem; font-size:2rem; letter-spacing:.12em; }
+    .start-card p { margin:0 0 1.4rem; color:var(--muted); font-size:1rem; line-height:1.75; }
+    #startButton,#retryButton { min-width:16rem; padding:.9rem 1.4rem; border:1px solid rgba(255,255,255,.25); border-radius:999px; color:#070914; background:linear-gradient(115deg,var(--blue),var(--gold)); font:inherit; font-size:1rem; font-weight:700; cursor:pointer; box-shadow:0 10px 34px rgba(90,122,255,.25); }
+    #startButton:disabled { cursor:wait; filter:grayscale(.55); opacity:.72; }
+    #retryButton { display:none; margin:0 auto; min-width:12rem; color:white; background:rgba(255,255,255,.08); box-shadow:none; }
+    .privacy { margin-top:1rem!important; font-size:.8rem!important; }
+    @media(max-width:650px){.brand{top:.8rem;left:.8rem}.brand p{display:none}#status{top:.8rem;right:.8rem;font-size:.75rem;max-width:66vw}.hand-card{padding:.7rem}.instr-action{font-size:.85rem}.start-card{padding:1.5rem}.start-card p{font-size:.9rem}}
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <div class="brand"><h1>指・感受</h1><p>跨世代微手勢 × 粒子視覺 × 聲音回饋</p></div>
+    <div id="status" role="status" aria-live="polite">正在載入手勢辨識模型…</div>
+    <section id="instruction-panel" aria-label="操作方式">
+      <div class="hand-card"><div class="hand-label">LEFT HAND · WOOD / ECHO</div><div class="instr-action left-hand">↕ 滑奏音階　｜　↔ 調整回音</div></div>
+      <div class="hand-card right"><div class="hand-label">RIGHT HAND · METAL / GRAVITY</div><div class="instr-action right-hand">捏合蓄力　｜　放開爆炸</div></div>
+    </section>
+  </div>
+
+  <div class="start-layer" id="startLayer">
+    <div class="start-card">
+      <h2>指・感受</h2>
+      <p>網頁載入後會立即詢問攝影機權限。選擇「允許」後，請按下方按鈕啟用聲音並開始互動。</p>
+      <button id="startButton" type="button" disabled>正在等待攝影機…</button>
+      <button id="retryButton" type="button">重新啟動攝影機</button>
+      <p class="privacy">影像只在你的裝置上即時分析，不會由本網站上傳或儲存。</p>
+    </div>
+  </div>
+
+  <script src="sketch.js"></script>
+</body>
+</html>
